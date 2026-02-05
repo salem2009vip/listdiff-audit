@@ -17,26 +17,21 @@ function makeId() {
   return "id_" + Math.random().toString(36).slice(2);
 }
 
-// إزالة التشكيل + التطويل فقط (بدون حذف أرقام)
 function stripArabic(s) {
   return (s || "")
     .replace(/[\u064B-\u065F]/g, "")
     .replace(/\u0640/g, "");
 }
 
-// تطبيع ذكي: يوحد حروف عربية + يحذف رموز/مسافات فقط
-// ✅ لا يحذف الأرقام إطلاقًا
+// تطبيع ذكي (يحافظ على الأرقام)
 function norm(s) {
   let x = stripArabic(s || "").toLowerCase();
-
-  // توحيد حروف
   x = x
     .replace(/[إأآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ؤ/g, "و")
     .replace(/ئ/g, "ي");
 
-  // حذف الرموز فقط (بدون أرقام)
   x = x
     .replace(/[.*=،,:;()\-_/\\]/g, " ")
     .replace(/\s+/g, " ")
@@ -55,20 +50,29 @@ function formatMoney(n) {
   return x.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// لصق قائمة -> عناصر (الشيء + القيمة + ملاحظة)
+/**
+ * ✅ لصق قائمة:
+ * - نستخرج "آخر رقم" فقط كقيمة (value)
+ * - ونترك أي أرقام قبلها داخل الاسم (مثل 6 متر، عدد 3)
+ */
 function parsePastedList(text) {
   const lines = (text || "").split("\n").map((l) => l.trim()).filter(Boolean);
   const items = [];
+
   for (const line of lines) {
-    const matches = line.match(/(\d[\d,]*\.?\d*)/g);
+    const matches = [...line.matchAll(/(\d[\d,]*\.?\d*)/g)];
     if (!matches || matches.length === 0) continue;
 
-    const rawNum = matches[matches.length - 1].replace(/,/g, "");
+    const last = matches[matches.length - 1];
+    const rawNum = (last[1] || "").replace(/,/g, "");
     const value = Number(rawNum);
     if (!Number.isFinite(value)) continue;
 
-    const name = line
-      .replace(/(\d[\d,]*\.?\d*)/g, " ")
+    // احذف آخر رقم فقط من السطر (المبلغ)
+    const start = last.index ?? 0;
+    const end = start + (last[0] || "").length;
+
+    const name = (line.slice(0, start) + " " + line.slice(end))
       .replace(/[=*]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
@@ -77,10 +81,10 @@ function parsePastedList(text) {
 
     items.push({ id: makeId(), name, value, note: "" });
   }
+
   return items;
 }
 
-// مقارنة نهائية (تطابق ذكي مع الأرقام)
 function diffFinal(oldItems, newItems) {
   const o = new Map();
   const n = new Map();
@@ -98,7 +102,6 @@ function diffFinal(oldItems, newItems) {
   const added = [];
   const removed = [];
   const changed = [];
-  const unchanged = [];
 
   for (const [k, ov] of o.entries()) {
     const nv = n.get(k);
@@ -106,22 +109,18 @@ function diffFinal(oldItems, newItems) {
     else {
       const a = Number(ov.value) || 0;
       const b = Number(nv.value) || 0;
-      if (Math.abs(a - b) < 0.000001) unchanged.push(nv);
-      else changed.push({ name: ov.name, oldValue: a, newValue: b, diff: b - a });
+      if (Math.abs(a - b) >= 0.000001) changed.push({ name: ov.name, oldValue: a, newValue: b, diff: b - a });
     }
   }
 
-  for (const [k, nv] of n.entries()) {
-    if (!o.has(k)) added.push(nv);
-  }
+  for (const [k, nv] of n.entries()) if (!o.has(k)) added.push(nv);
 
   const byName = (a, b) => norm(a.name).localeCompare(norm(b.name));
   added.sort(byName);
   removed.sort(byName);
-  unchanged.sort(byName);
   changed.sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
 
-  return { added, removed, changed, unchanged };
+  return { added, removed, changed };
 }
 
 /* ================= UI ================= */
@@ -150,15 +149,19 @@ function Tab({ active, onClick, children }) {
   );
 }
 
+/**
+ * ✅ تسجيل “عملية واحدة” فقط:
+ * - onChange يغيّر محليًا فقط
+ * - onBlur يعمل commit: save + log مرة واحدة
+ */
 function ItemsTable({
   title,
   items,
   locked,
   onAdd,
   onDelete,
-  onName,
-  onValue,
-  onNote,
+  onLocalPatch,      // تعديل محلي فقط
+  onCommitField,     // حفظ + سجل مرة واحدة
   search,
   setSearch,
 }) {
@@ -213,29 +216,50 @@ function ItemsTable({
                 <td style={{ padding: 8, borderBottom: "1px solid #f7f7f7" }}>
                   <input
                     value={x.name || ""}
-                    onChange={(e) => onName(x.id, e.target.value)}
-                    placeholder="مثال: مظلة 6 متر"
                     disabled={disabled}
-                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid #ddd", opacity: disabled ? 0.7 : 1 }}
+                    onChange={(e) => onLocalPatch(x.id, { name: e.target.value })}
+                    onBlur={() => onCommitField(x.id, "name")}
+                    placeholder="مثال: مظلة 6 متر"
+                    style={{
+                      width: "100%",
+                      padding: 9,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      opacity: disabled ? 0.7 : 1,
+                    }}
                   />
                 </td>
                 <td style={{ padding: 8, borderBottom: "1px solid #f7f7f7" }}>
                   <input
                     type="number"
                     value={x.value ?? ""}
-                    onChange={(e) => onValue(x.id, e.target.value === "" ? "" : Number(e.target.value))}
-                    placeholder="0"
                     disabled={disabled}
-                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid #ddd", opacity: disabled ? 0.7 : 1 }}
+                    onChange={(e) => onLocalPatch(x.id, { value: e.target.value === "" ? "" : Number(e.target.value) })}
+                    onBlur={() => onCommitField(x.id, "value")}
+                    placeholder="0"
+                    style={{
+                      width: "100%",
+                      padding: 9,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      opacity: disabled ? 0.7 : 1,
+                    }}
                   />
                 </td>
                 <td style={{ padding: 8, borderBottom: "1px solid #f7f7f7" }}>
                   <input
                     value={x.note || ""}
-                    onChange={(e) => onNote(x.id, e.target.value)}
-                    placeholder="مثال: دفعة / تم الاستلام"
                     disabled={disabled}
-                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid #ddd", opacity: disabled ? 0.7 : 1 }}
+                    onChange={(e) => onLocalPatch(x.id, { note: e.target.value })}
+                    onBlur={() => onCommitField(x.id, "note")}
+                    placeholder="مثال: دفعة / تم الاستلام"
+                    style={{
+                      width: "100%",
+                      padding: 9,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      opacity: disabled ? 0.7 : 1,
+                    }}
                   />
                 </td>
                 <td style={{ padding: 8, borderBottom: "1px solid #f7f7f7", textAlign: "center" }}>
@@ -270,94 +294,39 @@ function ItemsTable({
 }
 
 function EventsTab({ events }) {
-  const [q, setQ] = useState("");
-  const [listFilter, setListFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [whoFilter, setWhoFilter] = useState("all");
-
-  const whoOptions = useMemo(() => {
-    const s = new Set((events || []).map((e) => (e.who || "غير معروف").trim() || "غير معروف"));
-    return ["all", ...Array.from(s)];
-  }, [events]);
-
-  const filtered = useMemo(() => {
-    const qq = norm(q);
-    return (events || []).filter((e) => {
-      if (listFilter !== "all" && e.list_name !== listFilter) return false;
-      if (typeFilter !== "all" && e.action !== typeFilter) return false;
-      const who = (e.who || "غير معروف").trim() || "غير معروف";
-      if (whoFilter !== "all" && who !== whoFilter) return false;
-
-      if (!qq) return true;
-      const txt = norm(`${e.item_name_before || ""} ${e.item_name_after || ""} ${who} ${e.list_name || ""} ${e.action || ""}`);
-      return txt.includes(qq);
-    });
-  }, [events, q, listFilter, typeFilter, whoFilter]);
-
   return (
     <Card>
       <h3 style={{ marginTop: 0 }}>سجل التغييرات</h3>
-
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="بحث…" style={{ padding: 9, border: "1px solid #ddd", borderRadius: 10, minWidth: 220 }} />
-        <select value={listFilter} onChange={(e) => setListFilter(e.target.value)} style={{ padding: 9, border: "1px solid #ddd", borderRadius: 10 }}>
-          <option value="all">كل القوائم</option>
-          <option value="old">القديمة</option>
-          <option value="new">الجديدة</option>
-          <option value="system">النظام</option>
-        </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ padding: 9, border: "1px solid #ddd", borderRadius: 10 }}>
-          <option value="all">كل الأنواع</option>
-          <option value="add">إضافة</option>
-          <option value="delete">حذف</option>
-          <option value="update">تعديل</option>
-        </select>
-        <select value={whoFilter} onChange={(e) => setWhoFilter(e.target.value)} style={{ padding: 9, border: "1px solid #ddd", borderRadius: 10 }}>
-          {whoOptions.map((w) => (
-            <option key={w} value={w}>
-              {w === "all" ? "كل الأشخاص" : w}
-            </option>
-          ))}
-        </select>
-      </div>
-
       <div style={{ marginTop: 10 }}>
-        {filtered.length === 0 && <div style={{ color: "#666" }}>لا يوجد نتائج.</div>}
-
-        {filtered.map((ev) => {
-          const who = (ev.who || "غير معروف").trim() || "غير معروف";
-          const when = new Date(ev.created_at).toLocaleString();
-          return (
-            <div key={ev.id} style={{ padding: "10px 0", borderBottom: "1px solid #f1f1f1" }}>
-              <div style={{ color: "#666", fontSize: 13 }}>
-                <b>{who}</b> — {when}
-              </div>
-              <div style={{ marginTop: 4 }}>
-                <b>[{ev.list_name}]</b>{" "}
-                {ev.action === "add" && <>➕ أضاف: <b>{ev.item_name_after || ""}</b></>}
-                {ev.action === "delete" && <>🗑️ حذف: <b>{ev.item_name_before || ""}</b></>}
-                {ev.action === "update" && (
-                  <>✏️ عدّل: <b>{ev.item_name_before || ""}</b> → <b>{ev.item_name_after || ev.item_name_before || ""}</b></>
-                )}
-                {" "} | {formatMoney(ev.value_before)} → {formatMoney(ev.value_after)}
-              </div>
+        {(events || []).length === 0 && <div style={{ color: "#666" }}>لا يوجد تغييرات.</div>}
+        {(events || []).map((ev) => (
+          <div key={ev.id} style={{ padding: "10px 0", borderBottom: "1px solid #f1f1f1" }}>
+            <div style={{ color: "#666", fontSize: 13 }}>
+              <b>{(ev.who || "غير معروف").trim() || "غير معروف"}</b> — {new Date(ev.created_at).toLocaleString()}
             </div>
-          );
-        })}
+            <div style={{ marginTop: 4 }}>
+              <b>[{ev.list_name}]</b>{" "}
+              {ev.action === "add" && <>➕ أضاف: <b>{ev.item_name_after || ""}</b></>}
+              {ev.action === "delete" && <>🗑️ حذف: <b>{ev.item_name_before || ""}</b></>}
+              {ev.action === "update" && <>✏️ عدّل: <b>{ev.item_name_before || ""}</b> → <b>{ev.item_name_after || ev.item_name_before || ""}</b></>}
+              {" "} | {formatMoney(ev.value_before)} → {formatMoney(ev.value_after)}
+            </div>
+          </div>
+        ))}
       </div>
     </Card>
   );
 }
 
 function FinalTab({ oldItems, newItems }) {
+  const d = diffFinal(oldItems, newItems);
   const oldT = sumItems(oldItems);
   const newT = sumItems(newItems);
-  const d = diffFinal(oldItems, newItems);
 
   const boxStyle = (kind) => {
-    if (kind === "add") return { background: "#ecfdf3", border: "1px solid #b7f0c8" }; // أخضر
-    if (kind === "del") return { background: "#fff1f1", border: "1px solid #ffcccc" }; // أحمر
-    if (kind === "chg") return { background: "#fff7ed", border: "1px solid #ffd7aa" }; // برتقالي
+    if (kind === "add") return { background: "#ecfdf3", border: "1px solid #b7f0c8" };
+    if (kind === "del") return { background: "#fff1f1", border: "1px solid #ffcccc" };
+    if (kind === "chg") return { background: "#fff7ed", border: "1px solid #ffd7aa" };
     return { background: "#f7f7f7", border: "1px solid #e6e6e6" };
   };
 
@@ -370,38 +339,26 @@ function FinalTab({ oldItems, newItems }) {
         </div>
       </Card>
 
-      <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+      <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
         <Card>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ padding: 10, borderRadius: 12, ...boxStyle("add") }}>
               <b>➕ إضافات ({d.added.length})</b>
               <ul style={{ margin: "8px 0 0 0" }}>
-                {d.added.map((x) => (
-                  <li key={x.id}>
-                    {x.name} — {formatMoney(x.value)}
-                  </li>
-                ))}
+                {d.added.map((x) => <li key={x.id}>{x.name} — {formatMoney(x.value)}</li>)}
               </ul>
             </div>
-
             <div style={{ padding: 10, borderRadius: 12, ...boxStyle("del") }}>
               <b>➖ محذوف ({d.removed.length})</b>
               <ul style={{ margin: "8px 0 0 0" }}>
-                {d.removed.map((x) => (
-                  <li key={x.id}>
-                    {x.name} — {formatMoney(x.value)}
-                  </li>
-                ))}
+                {d.removed.map((x) => <li key={x.id}>{x.name} — {formatMoney(x.value)}</li>)}
               </ul>
             </div>
-
             <div style={{ padding: 10, borderRadius: 12, ...boxStyle("chg") }}>
               <b>✏️ تغيّر ({d.changed.length})</b>
               <ul style={{ margin: "8px 0 0 0" }}>
                 {d.changed.map((x, i) => (
-                  <li key={i}>
-                    {x.name}: {formatMoney(x.oldValue)} → {formatMoney(x.newValue)} (Δ {formatMoney(x.diff)})
-                  </li>
+                  <li key={i}>{x.name}: {formatMoney(x.oldValue)} → {formatMoney(x.newValue)} (Δ {formatMoney(x.diff)})</li>
                 ))}
               </ul>
             </div>
@@ -438,15 +395,53 @@ export default function App() {
 
   const [pinInput, setPinInput] = useState("");
 
-  // يمنع تسجيل مزدوج عند تحديث realtime
   const blockLog = useRef(false);
-
   const locked = !!room?.is_locked;
 
-  /* ---------- Load room + events + versions ---------- */
+  // ✅ نخزن “قبل” لكل بند عند أول تعديل عشان نقرر هل نسجل ولا لا
+  const beforeRef = useRef({
+    old: new Map(), // itemId -> snapshot
+    new: new Map(),
+  });
+
+  function getListNameByItemId(itemId) {
+    if (oldItems.some((x) => x.id === itemId)) return "old";
+    if (newItems.some((x) => x.id === itemId)) return "new";
+    return null;
+  }
+
+  function getItem(listName, itemId) {
+    const src = listName === "old" ? oldItems : newItems;
+    return src.find((x) => x.id === itemId);
+  }
+
+  function setItems(listName, next) {
+    if (listName === "old") setOldItems(next);
+    else setNewItems(next);
+  }
+
+  async function saveRoom(nextOld, nextNew, patchRoom = null) {
+    const payload = {
+      old_items: nextOld,
+      new_items: nextNew,
+      updated_at: new Date().toISOString(),
+      ...(patchRoom || {}),
+    };
+    const { error } = await supabase.from("rooms").update(payload).eq("id", roomId);
+    if (error) setStatus("save error: " + error.message);
+  }
+
+  async function logEvent(e) {
+    if (blockLog.current) return;
+    const name = (localStorage.getItem("listdiff_who") || who || "Unknown").trim() || "Unknown";
+    const payload = { room_id: roomId, who: name, ...e };
+    const { error } = await supabase.from("room_events").insert(payload);
+    if (error) setStatus("log error: " + error.message);
+  }
+
+  /* ---------- Load ---------- */
   useEffect(() => {
     let alive = true;
-
     async function load() {
       setStatus("loading room...");
 
@@ -482,34 +477,20 @@ export default function App() {
         setStatus("connected ✅");
       }
 
-      const ev = await supabase
-        .from("room_events")
-        .select("*")
-        .eq("room_id", roomId)
-        .order("created_at", { ascending: false })
-        .limit(300);
-
+      const ev = await supabase.from("room_events").select("*").eq("room_id", roomId).order("created_at", { ascending: false }).limit(300);
       if (!alive) return;
       if (!ev.error) setEvents(ev.data || []);
 
-      const vv = await supabase
-        .from("room_versions")
-        .select("*")
-        .eq("room_id", roomId)
-        .order("created_at", { ascending: false })
-        .limit(50);
-
+      const vv = await supabase.from("room_versions").select("*").eq("room_id", roomId).order("created_at", { ascending: false }).limit(50);
       if (!alive) return;
       if (!vv.error) setVersions(vv.data || []);
     }
 
     load();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [roomId]);
 
-  /* ---------- Realtime subscriptions ---------- */
+  /* ---------- Realtime ---------- */
   useEffect(() => {
     const chRooms = supabase
       .channel("rooms-live")
@@ -548,32 +529,9 @@ export default function App() {
     };
   }, [roomId]);
 
-  /* ---------- Save & Log ---------- */
-  async function saveRoom(nextOld, nextNew, patchRoom = null) {
-    const payload = {
-      old_items: nextOld,
-      new_items: nextNew,
-      updated_at: new Date().toISOString(),
-      ...(patchRoom || {}),
-    };
-    const { error } = await supabase.from("rooms").update(payload).eq("id", roomId);
-    if (error) setStatus("save error: " + error.message);
-  }
-
-  async function logEvent(e) {
-    if (blockLog.current) return;
-    const name = (localStorage.getItem("listdiff_who") || who || "Unknown").trim() || "Unknown";
-    const payload = { room_id: roomId, who: name, ...e };
-    const { error } = await supabase.from("room_events").insert(payload);
-    if (error) setStatus("log error: " + error.message);
-  }
-
   /* ---------- Lock / Unlock ---------- */
   async function lockRoom() {
-    if (!pinInput.trim()) {
-      alert("حطي PIN للقفل (مثلاً 1234)");
-      return;
-    }
+    if (!pinInput.trim()) return alert("حطي PIN للقفل (مثلاً 1234)");
     await saveRoom(oldItems, newItems, { is_locked: true, lock_pin: pinInput.trim() });
     await logEvent({ action: "update", list_name: "system", item_id: makeId(), item_name_before: "lock", item_name_after: "locked" });
     setPinInput("");
@@ -581,16 +539,13 @@ export default function App() {
 
   async function unlockRoom() {
     if (!room) return;
-    if ((pinInput.trim() || "") !== (room.lock_pin || "")) {
-      alert("PIN غير صحيح");
-      return;
-    }
+    if ((pinInput.trim() || "") !== (room.lock_pin || "")) return alert("PIN غير صحيح");
     await saveRoom(oldItems, newItems, { is_locked: false });
     await logEvent({ action: "update", list_name: "system", item_id: makeId(), item_name_before: "lock", item_name_after: "unlocked" });
     setPinInput("");
   }
 
-  /* ---------- Operations ---------- */
+  /* ---------- Add/Delete ---------- */
   async function addRow(listName) {
     if (locked) return;
     const it = { id: makeId(), name: "", value: "", note: "" };
@@ -612,13 +567,9 @@ export default function App() {
     const before = src.find((x) => x.id === itemId);
     const next = src.filter((x) => x.id !== itemId);
 
-    if (listName === "old") {
-      setOldItems(next);
-      await saveRoom(next, newItems);
-    } else {
-      setNewItems(next);
-      await saveRoom(oldItems, next);
-    }
+    setItems(listName, next);
+    if (listName === "old") await saveRoom(next, newItems);
+    else await saveRoom(oldItems, next);
 
     await logEvent({
       action: "delete",
@@ -626,39 +577,71 @@ export default function App() {
       item_id: itemId,
       item_name_before: before?.name || "",
       value_before: before?.value === "" ? null : Number(before?.value),
+      note_before: before?.note || "",
     });
   }
 
-  async function updateField(listName, itemId, patch) {
-    if (locked) return;
+  /* ---------- Local edit (NO LOG) ---------- */
+  function localPatch(listName, itemId, patch) {
     const src = listName === "old" ? oldItems : newItems;
     const idx = src.findIndex((x) => x.id === itemId);
     if (idx === -1) return;
 
-    const before = src[idx];
-    const after = { ...before, ...patch };
-    const next = src.slice();
-    next[idx] = after;
+    // خزّن "قبل" أول مرة فقط
+    const store = beforeRef.current[listName];
+    if (!store.has(itemId)) store.set(itemId, { ...src[idx] });
 
-    if (listName === "old") {
-      setOldItems(next);
-      await saveRoom(next, newItems);
-    } else {
-      setNewItems(next);
-      await saveRoom(oldItems, next);
+    const next = src.slice();
+    next[idx] = { ...next[idx], ...patch };
+    setItems(listName, next);
+  }
+
+  /* ---------- Commit onBlur (SAVE + LOG مرة واحدة) ---------- */
+  async function commitField(itemId, fieldName) {
+    if (locked) return;
+
+    const listName = getListNameByItemId(itemId);
+    if (!listName) return;
+
+    const store = beforeRef.current[listName];
+    const before = store.get(itemId);
+    const after = getItem(listName, itemId);
+
+    // ما تغيّر شيء؟ لا تسجّل
+    if (!before || !after) return;
+
+    const changed =
+      (before.name || "") !== (after.name || "") ||
+      (before.note || "") !== (after.note || "") ||
+      (Number(before.value) || 0) !== (Number(after.value) || 0);
+
+    if (!changed) {
+      store.delete(itemId);
+      return;
     }
 
+    // احفظ القوائم الحالية
+    if (listName === "old") await saveRoom(oldItems, newItems);
+    else await saveRoom(oldItems, newItems);
+
+    // سجّل عملية واحدة
     await logEvent({
       action: "update",
       list_name: listName,
       item_id: itemId,
       item_name_before: before.name || "",
-      item_name_after: after.name || before.name || "",
+      item_name_after: after.name || "",
       value_before: before.value === "" ? null : Number(before.value),
       value_after: after.value === "" ? null : Number(after.value),
+      note_before: before.note || "",
+      note_after: after.note || "",
+      changed_field: fieldName,
     });
+
+    store.delete(itemId);
   }
 
+  /* ---------- Paste ---------- */
   async function importPaste(listName, pastedText) {
     if (locked) return;
     const parsed = parsePastedList(pastedText);
@@ -683,7 +666,7 @@ export default function App() {
     });
   }
 
-  /* ---------- Versions (Snapshots) ---------- */
+  /* ---------- Versions ---------- */
   async function saveVersion(note) {
     const savedBy = (localStorage.getItem("listdiff_who") || who || "Unknown").trim() || "Unknown";
     const { error } = await supabase.from("room_versions").insert({
@@ -698,10 +681,7 @@ export default function App() {
   }
 
   async function restoreVersion(v) {
-    if (locked) {
-      alert("الغرفة مقفولة. افتحي القفل أولاً.");
-      return;
-    }
+    if (locked) return alert("الغرفة مقفولة. افتحي القفل أولاً.");
     if (!v) return;
 
     blockLog.current = true;
@@ -710,14 +690,7 @@ export default function App() {
     await saveRoom(v.old_items || [], v.new_items || []);
     setTimeout(() => (blockLog.current = false), 0);
 
-    await logEvent({
-      action: "update",
-      list_name: "system",
-      item_id: makeId(),
-      item_name_before: "version",
-      item_name_after: `restore ${v.id}`,
-    });
-
+    await logEvent({ action: "update", list_name: "system", item_id: makeId(), item_name_before: "version", item_name_after: `restore ${v.id}` });
     alert("✅ تم استرجاع النسخة");
   }
 
@@ -728,14 +701,12 @@ export default function App() {
         <Card>
           <h2 style={{ marginTop: 0 }}>ادخلي اسمك</h2>
           <div style={{ color: "#666", fontSize: 13 }}>الاسم ضروري للسجل.</div>
-
           <input
             value={who}
             onChange={(e) => setWho(e.target.value)}
             placeholder="مثال: فاطمة"
             style={{ width: "100%", padding: 10, border: "1px solid #ddd", borderRadius: 10, marginTop: 10 }}
           />
-
           <button
             onClick={() => {
               const w = who.trim();
@@ -766,15 +737,7 @@ export default function App() {
         <h2 style={{ margin: "0 0 6px 0" }}>مقارنة القوائم (مباشر + سجل + إصدارات)</h2>
         <div style={{ color: "#666", fontSize: 13 }}>
           Room: <b>{roomId}</b> — أنت: <b>{localStorage.getItem("listdiff_who")}</b> — الحالة: {status}{" "}
-          {locked ? (
-            <>
-              — 🔒 <b>مقفول</b>
-            </>
-          ) : (
-            <>
-              — 🔓 <b>مفتوح</b>
-            </>
-          )}
+          {locked ? <>— 🔒 <b>مقفول</b></> : <>— 🔓 <b>مفتوح</b></>}
         </div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -785,7 +748,6 @@ export default function App() {
           <Tab active={tab === "versions"} onClick={() => setTab("versions")}>الإصدارات</Tab>
         </div>
 
-        {/* Lock controls */}
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
             value={pinInput}
@@ -824,7 +786,7 @@ export default function App() {
 
               {pasteOldOpen && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ color: "#666", fontSize: 13 }}>الصقي القائمة هنا (كل سطر فيه اسم + رقم).</div>
+                  <div style={{ color: "#666", fontSize: 13 }}>الصقي القائمة هنا (كل سطر: اسم + المبلغ).</div>
                   <textarea
                     value={pasteOldText}
                     onChange={(e) => setPasteOldText(e.target.value)}
@@ -857,9 +819,8 @@ export default function App() {
               locked={locked}
               onAdd={() => addRow("old")}
               onDelete={(id) => deleteRow("old", id)}
-              onName={(id, v) => updateField("old", id, { name: v })}
-              onValue={(id, v) => updateField("old", id, { value: v })}
-              onNote={(id, v) => updateField("old", id, { note: v })}
+              onLocalPatch={(id, patch) => localPatch("old", id, patch)}
+              onCommitField={(id, field) => commitField(id, field)}
               search={searchOld}
               setSearch={setSearchOld}
             />
@@ -882,7 +843,7 @@ export default function App() {
 
               {pasteNewOpen && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ color: "#666", fontSize: 13 }}>الصقي القائمة هنا (كل سطر فيه اسم + رقم).</div>
+                  <div style={{ color: "#666", fontSize: 13 }}>الصقي القائمة هنا (كل سطر: اسم + المبلغ).</div>
                   <textarea
                     value={pasteNewText}
                     onChange={(e) => setPasteNewText(e.target.value)}
@@ -915,9 +876,8 @@ export default function App() {
               locked={locked}
               onAdd={() => addRow("new")}
               onDelete={(id) => deleteRow("new", id)}
-              onName={(id, v) => updateField("new", id, { name: v })}
-              onValue={(id, v) => updateField("new", id, { value: v })}
-              onNote={(id, v) => updateField("new", id, { note: v })}
+              onLocalPatch={(id, patch) => localPatch("new", id, patch)}
+              onCommitField={(id, field) => commitField(id, field)}
               search={searchNew}
               setSearch={setSearchNew}
             />
@@ -929,8 +889,6 @@ export default function App() {
         {tab === "versions" && (
           <Card>
             <h3 style={{ marginTop: 0 }}>الإصدارات (Snapshots)</h3>
-            <div style={{ color: "#666", fontSize: 13 }}>احفظي نسخة قبل أي تعديل كبير، واسترجعيها وقت الحاجة.</div>
-
             <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 onClick={() => {
@@ -951,7 +909,7 @@ export default function App() {
                   <div style={{ color: "#666", fontSize: 13 }}>
                     <b>{v.saved_by}</b> — {new Date(v.created_at).toLocaleString()} {v.note ? `— 📝 ${v.note}` : ""}
                   </div>
-                  <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ marginTop: 6 }}>
                     <button
                       onClick={() => restoreVersion(v)}
                       disabled={locked}
@@ -965,10 +923,6 @@ export default function App() {
             </div>
           </Card>
         )}
-      </div>
-
-      <div style={{ marginTop: 12, color: "#666", fontSize: 13 }}>
-        ✅ الآن: رابط واحد فقط. أي شخص يفتح الرابط يقدر يعدّل إذا الغرفة غير مقفولة.
       </div>
     </div>
   );
